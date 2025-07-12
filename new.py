@@ -1,3 +1,7 @@
+"""
+Facebook Auto Commenter with Full GUI Functionality
+"""
+
 import os
 import json
 import random
@@ -16,7 +20,10 @@ COMMENT_FILE = "comment.txt"
 LOG_FILE = "log.txt"
 HISTORY_FILE = "history.txt"
 STATUS_FILE = "status.json"
-COMMENTS_PER_ACCOUNT = 2
+POST_CACHE_FILE = "post_cache.json"
+COMMENTS_PER_ACCOUNT = 1
+
+CACHE = {}  # in-memory cache
 
 def log(msg):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -52,14 +59,13 @@ def load_comments(folder=None):
     if not os.path.exists(comment_path):
         return ["تعليق افتراضي"]
     with open(comment_path, "r", encoding="utf-8") as f:
-        content = f.read()
         try:
-            comments = json.loads(content.strip())
+            comments = json.load(f)
             if isinstance(comments, list):
                 return comments
         except:
             pass
-        return [line.strip() for line in content.splitlines() if line.strip()]
+        return [line.strip() for line in f.read().splitlines() if line.strip()]
 
 def save_comments(folder, comments_list):
     comment_path = os.path.join(folder, COMMENT_FILE)
@@ -97,27 +103,39 @@ def load_proxy(folder):
             return f.read().strip()
     return None
 
-def save_proxy(folder, proxy_value):
-    proxy_file = os.path.join(folder, "proxy.txt")
-    with open(proxy_file, "w", encoding="utf-8") as f:
-        f.write(proxy_value.strip())
-
 def start_driver(proxy=None):
     options = Options()
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
+    options.add_argument("--headless=new")
     if proxy:
         options.add_argument(f"--proxy-server={proxy}")
     return webdriver.Chrome(options=options)
+
+def load_post_cache():
+    global CACHE
+    if CACHE:
+        return CACHE
+    if os.path.exists(POST_CACHE_FILE):
+        with open(POST_CACHE_FILE, "r", encoding="utf-8") as f:
+            CACHE = json.load(f)
+    return CACHE
+
+def save_post_cache(cache):
+    with open(POST_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
 
 def comment_on_link(driver, link, comment_text):
     try:
         driver.get(link)
         WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        time.sleep(5)
+        time.sleep(2)
 
-        xpaths = [
+        cache = load_post_cache()
+        cached_xpath = cache.get(link)
+
+        xpaths = [cached_xpath] if cached_xpath else [
             '//div[@aria-label="اكتب تعليقًا..."]',
             '//div[@aria-label="Write a comment…"]',
             '//div[@aria-label="Write a comment"]',
@@ -128,12 +146,16 @@ def comment_on_link(driver, link, comment_text):
 
         input_area = None
         for xpath in xpaths:
+            if not xpath:
+                continue
             try:
-                input_area = WebDriverWait(driver, 7).until(
+                input_area = WebDriverWait(driver, 5).until(
                     EC.presence_of_element_located((By.XPATH, xpath))
                 )
-                if input_area:
-                    break
+                if input_area and not cached_xpath:
+                    cache[link] = xpath
+                    save_post_cache(cache)
+                break
             except:
                 continue
 
@@ -146,181 +168,108 @@ def comment_on_link(driver, link, comment_text):
         input_area.send_keys(comment_text)
         time.sleep(1)
         input_area.send_keys("\n")
-        time.sleep(2)
+        time.sleep(1)
 
         return True
     except Exception as e:
         log(f"❌ فشل التعليق: {e}")
         return False
 
-def create_new_account():
-    new_name = simpledialog.askstring("📁 اسم الحساب الجديد", "أدخل اسم مجلد الحساب الجديد:")
-    if not new_name:
-        return
-    new_folder = os.path.join(BASE_DIR, new_name)
-    if os.path.exists(new_folder):
-        messagebox.showwarning("⚠️ موجود بالفعل", "هذا الحساب موجود بالفعل.")
-        return
-    os.makedirs(new_folder, exist_ok=True)
-    with open(os.path.join(new_folder, "cookies.txt"), "w", encoding="utf-8") as f:
-        f.write("[]")
-    with open(os.path.join(new_folder, "proxy.txt"), "w", encoding="utf-8") as f:
-        f.write("")
-    with open(os.path.join(new_folder, COMMENT_FILE), "w", encoding="utf-8") as f:
-        json.dump(["تعليق جديد"], f, ensure_ascii=False, indent=2)
-    messagebox.showinfo("✅ تم", f"تم إنشاء حساب {new_name} بنجاح.")
-
-def run_comments():
-    link = link_entry.get().strip()
-    if not link:
-        messagebox.showwarning("❗", "يرجى إدخال رابط المنشور.")
-        return
-
-    folders = [os.path.join(BASE_DIR, name) for name in os.listdir(BASE_DIR)
-               if os.path.isdir(os.path.join(BASE_DIR, name))]
-
-    if not folders:
-        messagebox.showerror("⚠️", "لم يتم العثور على حسابات.")
-        return
-
-    progress["value"] = 0
-    root.update_idletasks()
-
-    at_least_one_success = False
-
-    for idx, folder in enumerate(folders):
-        convert_cookies_txt_to_json(folder)
-        cookie_file = os.path.join(folder, "cookies.json")
-        account_name = os.path.basename(folder)
-
-        if not os.path.exists(cookie_file):
-            log(f"⛔ لا يوجد ملف cookies.json في {folder}")
-            update_status(account_name, False)
-            continue
-
-        proxy = load_proxy(folder)
-        comments = load_comments(folder)
-
-        try:
-            driver = start_driver(proxy)
-            driver.get("https://facebook.com")
-            load_cookies(driver, cookie_file)
-            driver.get(link)
-            success = False
-            for _ in range(COMMENTS_PER_ACCOUNT):
-                text = random.choice(comments)
-                if comment_on_link(driver, link, text):
-                    log(f"✅ [{account_name}] تم التعليق: {text}")
-                    success = True
-                else:
-                    log(f"⚠️ [{account_name}] فشل التعليق.")
-            driver.quit()
-            update_status(account_name, success)
-            if success:
-                at_least_one_success = True
-        except Exception as e:
-            log(f"❌ [{account_name}] خطأ: {e}")
-            update_status(account_name, False)
-
-        progress["value"] = ((idx + 1) / len(folders)) * 100
-        root.update_idletasks()
-
-    if at_least_one_success:
-        save_history(link)
-
-    messagebox.showinfo("تم", "✅ انتهت عملية التعليق من جميع الحسابات.")
-
-# ====== واجهة المستخدم ======
+# === GUI ===
 root = tk.Tk()
-root.title("🗨️ أداة التعليق التلقائي على فيسبوك")
-root.geometry("500x800")
+root.title("Facebook Auto Commenter")
+root.geometry("500x750")
 root.configure(bg="white")
 
-frame = tk.Frame(root, bg="white")
-frame.pack(padx=20, pady=20, fill="both", expand=True)
+frame = tk.Frame(root, padx=10, pady=10, bg="white")
+frame.pack(fill="both", expand=True)
 
-link_entry = tk.Entry(frame)
+link_var = tk.StringVar()
 tk.Label(frame, text="🔗 رابط المنشور:", bg="white").pack(anchor="w")
-link_entry.pack(fill="x", pady=5)
+tk.Entry(frame, textvariable=link_var).pack(fill="x", pady=5)
 
-history_links = load_history_links()
-history_combo = ttk.Combobox(frame, values=history_links)
-
-def on_history_select(event):
-    link_entry.delete(0, tk.END)
-    link_entry.insert(0, history_combo.get())
-
-history_combo.bind("<<ComboboxSelected>>", on_history_select)
+history_combo = ttk.Combobox(frame, values=load_history_links())
 history_combo.pack(fill="x", pady=5)
 
-tk.Button(frame, text="🚀 ابدأ التعليق", command=run_comments, bg="#4CAF50", fg="white").pack(pady=10)
+def on_history_select(event):
+    link_var.set(history_combo.get())
+
+history_combo.bind("<<ComboboxSelected>>", on_history_select)
+
 progress = ttk.Progressbar(frame, length=450, mode="determinate")
 progress.pack(pady=10)
 
-tk.Label(frame, text="🛠️ تحرير بروكسي حساب:", bg="white").pack(anchor="w", pady=(10, 0))
-proxy_combo = ttk.Combobox(frame, values=os.listdir(BASE_DIR))
-proxy_combo.pack(fill="x", pady=5)
-
-def edit_proxy():
-    selected = proxy_combo.get()
-    if not selected:
-        messagebox.showwarning("تنبيه", "يرجى اختيار مجلد الحساب أولاً")
-        return
-    folder_path = os.path.join(BASE_DIR, selected)
-    old_value = load_proxy(folder_path) or ""
-    new_value = simpledialog.askstring("تعديل البروكسي", "أدخل البروكسي الجديد:", initialvalue=old_value)
-    if new_value is not None:
-        save_proxy(folder_path, new_value)
-        messagebox.showinfo("تم", "✅ تم تحديث البروكسي")
-
-def view_history():
-    if not os.path.exists(HISTORY_FILE):
-        messagebox.showinfo("📜 سجل المنشورات", "لا يوجد سجل حتى الآن.")
-        return
-    with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-        history_data = f.read()
-    top = tk.Toplevel(root)
-    top.title("📜 سجل المنشورات")
-    text = tk.Text(top, wrap="word")
-    text.insert("1.0", history_data)
-    text.pack(expand=True, fill="both")
+def run_comments():
+    link = link_var.get().strip()
+    if not link:
+        return messagebox.showwarning("تنبيه", "يرجى إدخال رابط المنشور.")
+    save_history(link)
+    accounts = os.listdir(BASE_DIR)
+    progress["maximum"] = len(accounts)
+    progress["value"] = 0
+    for acc in accounts:
+        folder = os.path.join(BASE_DIR, acc)
+        convert_cookies_txt_to_json(folder)
+        cookies_file = os.path.join(folder, "cookies.json")
+        proxy = load_proxy(folder)
+        comments = load_comments(folder)
+        if not comments:
+            continue
+        driver = start_driver(proxy)
+        try:
+            load_cookies(driver, cookies_file)
+            for _ in range(COMMENTS_PER_ACCOUNT):
+                comment = random.choice(comments)
+                success = comment_on_link(driver, link, comment)
+                update_status(acc, success)
+                if success:
+                    log(f"✅ [{acc}] تم التعليق: {comment}")
+                else:
+                    log(f"⚠️ [{acc}] فشل التعليق.")
+        finally:
+            driver.quit()
+        progress["value"] += 1
+        root.update_idletasks()
 
 def manage_comments():
     top = tk.Toplevel(root)
-    top.title("📝 إدارة تعليقات الحسابات")
-    top.geometry("400x300")
+    top.title("إدارة تعليقات الحسابات")
+    top.geometry("400x400")
+    accs = os.listdir(BASE_DIR)
 
-    account_list = os.listdir(BASE_DIR)
-    combo = ttk.Combobox(top, values=account_list)
-    combo.pack(fill="x", pady=10)
-
-    text = tk.Text(top, wrap="word")
-    text.pack(expand=True, fill="both")
-
-    def load_account_comments(event=None):
-        account = combo.get()
-        path = os.path.join(BASE_DIR, account)
-        if not os.path.isdir(path):
-            return
-        comments = load_comments(path)
-        text.delete("1.0", tk.END)
-        for line in comments:
-            text.insert(tk.END, line + "\n")
+    def on_select(event):
+        acc = acc_combo.get()
+        folder = os.path.join(BASE_DIR, acc)
+        comments = load_comments(folder)
+        text_box.delete("1.0", "end")
+        text_box.insert("1.0", "\n".join(comments))
 
     def save_account_comments():
-        account = combo.get()
-        path = os.path.join(BASE_DIR, account)
-        if not os.path.isdir(path):
-            return
-        content = text.get("1.0", tk.END).strip().split("\n")
-        content = [line.strip() for line in content if line.strip()]
-        save_comments(path, content)
-        messagebox.showinfo("تم", "✅ تم حفظ التعليقات")
+        acc = acc_combo.get()
+        folder = os.path.join(BASE_DIR, acc)
+        new_comments = [line.strip() for line in text_box.get("1.0", "end").splitlines() if line.strip()]
+        save_comments(folder, new_comments)
+        messagebox.showinfo("تم الحفظ", "✅ تم حفظ تعليقات الحساب.")
 
-    combo.bind("<<ComboboxSelected>>", load_account_comments)
+    acc_combo = ttk.Combobox(top, values=accs)
+    acc_combo.pack(fill="x", pady=5)
+    acc_combo.bind("<<ComboboxSelected>>", on_select)
+
+    text_box = tk.Text(top, height=15)
+    text_box.pack(fill="both", expand=True, pady=5)
+
     tk.Button(top, text="💾 حفظ التعديلات", command=save_account_comments).pack(pady=5)
 
-tk.Button(frame, text="📜 عرض سجل المنشورات", command=view_history, bg="#2196F3", fg="white").pack(pady=10)
+def create_new_account():
+    name = simpledialog.askstring("اسم الحساب الجديد", "أدخل اسم الحساب الجديد:")
+    if name:
+        folder = os.path.join(BASE_DIR, name)
+        os.makedirs(folder, exist_ok=True)
+        save_comments(folder, ["تعليق جديد"])
+        messagebox.showinfo("✅ تم", f"تم إنشاء الحساب: {name}")
+
+tk.Button(frame, text="🚀 ابدأ التعليق", command=run_comments, bg="#4CAF50", fg="white").pack(pady=10)
+tk.Button(frame, text="📜 عرض سجل المنشورات", command=lambda: messagebox.showinfo("السجل", "\n".join(load_history_links())), bg="#2196F3", fg="white").pack(pady=10)
 tk.Button(frame, text="📝 إدارة تعليقات الحسابات", command=manage_comments, bg="#FF9800", fg="white").pack(pady=10)
 tk.Button(frame, text="➕ إنشاء حساب جديد", command=create_new_account, bg="#9C27B0", fg="white").pack(pady=10)
 
